@@ -341,13 +341,13 @@ wget.callbacks.write_to_warc = function(url, http_stat)
       else
         io.stdout:write("Sums do not match: expected " .. hash .. ", got " .. calculated .. ".\n")
         io.stdout:flush()
-        if not string.match(hash, "%-") then
+        --[[if not string.match(hash, "%-") then
           retry_url = true
           return false
-        else
-          io.stdout:write("Still accepting... the hash has a -.\n")
+        else]]
+          io.stdout:write("Still accepting...\n")
           io.stdout:flush()
-        end
+        --end
       end
     end
   end

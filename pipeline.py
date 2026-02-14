@@ -76,7 +76,7 @@ if not WGET_AT:
 #
 # Update this each time you make a non-cosmetic change.
 # It will be added to the WARC files and reported to the tracker.
-VERSION = '20260214.01'
+VERSION = '20260214.02'
 USER_AGENT = 'docker/29.2.1'
 TRACKER_ID = 'docker'
 TRACKER_HOST = 'legacy-api.arpa.li'
