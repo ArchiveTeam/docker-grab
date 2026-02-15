@@ -275,12 +275,14 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         end
       end
       local content_type = http_stat["response_headers"]["headers"]["content-type"][1]
-      if content_type == "application/vnd.oci.image.index.v1+json" then
+      if content_type == "application/vnd.oci.image.index.v1+json"
+        or content_type == "application/vnd.docker.distribution.manifest.list.v2+json" then
         for _, manifest in pairs(cjson.decode(html)["manifests"]) do
           print_digest("Queuing new digest ", manifest["digest"])
           check_with_bearer(urlparse.absolute(url, "./" .. manifest["digest"]))
         end
-      elseif content_type == "application/vnd.oci.image.manifest.v1+json" then
+      elseif content_type == "application/vnd.oci.image.manifest.v1+json"
+        or content_type == "application/vnd.docker.distribution.manifest.v2+json" then
         json = cjson.decode(html)
           print_digest("Queuing config blob ", json["config"]["digest"])
         check_with_bearer(urlparse.absolute(url, "../blobs/" .. json["config"]["digest"]))
@@ -288,6 +290,11 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
           print_digest("Queuing binary blob digest ", layer["digest"])
           check_with_bearer(urlparse.absolute(url, "../blobs/" .. layer["digest"]))
         end
+      else
+        io.stdout:write("Unrecognized content-type " .. content_type .. ".")
+        io.stdout:flush()
+        abort_item()
+        return {}
       end
     end
   end
@@ -315,15 +322,21 @@ wget.callbacks.write_to_warc = function(url, http_stat)
   is_initial_url = false
   if http_stat["statcode"] == 401 then
     -- still mark as correct, handle in get_urls
+    io.stdout:write("Not writing this 401 to WARC.\n")
+    io.stdout:flush()
     return false
   end
   if http_stat["statcode"] ~= 200
     and http_stat["statcode"] ~= 307 then
+    io.stdout:write("Bad status code.\n")
+    io.stdout:flush()
     retry_url = true
     return false
   end
   if http_stat["len"] == 0
     and http_stat["statcode"] < 300 then
+    io.stdout:write("Found body size 0.\n")
+    io.stdout:flush()
     retry_url = true
     return false
   end
