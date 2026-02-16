@@ -23,11 +23,14 @@ local logged_response = false
 
 local discovered_outlinks = {}
 local discovered_items = {}
+local discovered_items_sha256 = {}
 local bad_items = {}
 local ids = {}
 
 local item_patterns = {
   ["^https?://registry%-1%.docker%.io/v2/(.-/manifests/[^/]+)$"] = "image",
+  ["^https?://registry%-1%.docker%.io/v2/(.-/blobs/[^/]+)$"] = "blob",
+  ["^https?://registry%-1%.docker%.io/v2/(.-)/tags/list$"] = "name",
 }
 
 local retry_url = false
@@ -70,8 +73,12 @@ processed = function(url)
 end
 
 discover_item = function(target, item)
+  if target == discovered_items
+    and string.match(item, "^[a-z]+:[^/]+:sha256:") then
+    target = discovered_items_sha256
+  end
   if not target[item] then
---print("discovered", item)
+print("discovered", item)
     target[item] = true
     return true
   end
@@ -104,7 +111,15 @@ set_item = function(url)
   if found then
     local newcontext = {}
     new_item_type = found["type"]
-    new_item_value = string.gsub(found["value"], "/manifests/", ":")
+    if new_item_type == "image" then
+      new_item_value = string.gsub(found["value"], "/manifests/", ":")
+    elseif new_item_type == "blob" then
+      new_item_value = string.gsub(found["value"], "/blobs/", ":")
+    elseif new_item_type == "name" then
+      new_item_value = found["value"]
+    else
+      error("Unknown item type " .. new_item_type)
+    end
     new_item_name = new_item_type .. ":" .. new_item_value
     if new_item_name ~= item_name then
       ids = {}
@@ -115,7 +130,13 @@ set_item = function(url)
       context["seen_digests"] = {}
       item_value = new_item_value
       item_type = new_item_type
-      context["image"], context["tag"] = string.match(item_value, "^([^:]+):(.+)$")
+      if item_type == "image" or item_type == "blob" then
+        context["image"], context["tag"] = string.match(item_value, "^([^:]+):(.+)$")
+        ids[string.lower(context["tag"])] = true
+      elseif item_type == "name" then
+        context["image"] = item_value
+        context["tag"] = nil
+      end
       ids[string.lower(item_value)] = true
       ids[string.lower(new_item_name)] = true
       abortgrab = false
@@ -140,11 +161,17 @@ allowed = function(url, parenturl)
   for pattern, type_ in pairs(item_patterns) do
     match = string.match(url, pattern)
     if match then
-      local new_item = type_ .. ":" .. match
-      if new_item == item_name or ids[new_item] then
-        return true
+      if type_ == "image" then
+        match = string.gsub(match, "/manifests/", ":")
+      elseif type_ == "blob" then
+        match = string.gsub(match, "/blobs/", ":")
       end
+      local new_item = type_ .. ":" .. match
+      --[[if new_item == item_name or ids[new_item] then
+        return true
+      end]]
       if new_item ~= item_name then
+print('found new item', new_item)
         discover_item(discovered_items, new_item)
         skip = true
       end
@@ -154,7 +181,7 @@ allowed = function(url, parenturl)
     return false
   end
 
-  --[[for _, pattern in pairs({
+  for _, pattern in pairs({
     "/blobs/([^/%?&;]+)$",
     "/manifests/([^/%?&;]+)$"
   }) do
@@ -163,7 +190,7 @@ allowed = function(url, parenturl)
         return true
       end
     end
-  end]]
+  end
 
   return false
 end
@@ -186,13 +213,14 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
   end
 
   local function check(newurl)
-    ids[newurl] = true
-    local headers = {}
-    for k, v in pairs(new_headers) do
-      headers[k] = v
+    if allowed(newurl) then
+      local headers = {}
+      for k, v in pairs(new_headers) do
+        headers[k] = v
+      end
+      headers["Accept"] = headers["Accept"] or "application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.artifact.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, */*"
+      table.insert(urls, {url=newurl .. "#", headers=headers})
     end
-    headers["Accept"] = headers["Accept"] or "application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, */*"
-    table.insert(urls, {url=newurl .. "#", headers=headers})
   end
 
   local function check_with_bearer(newurl, h)
@@ -214,10 +242,26 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     end
   end
 
+  local function check_next_page(base_url, link)
+    if link then
+      local next_page = string.match(link[1], "<([^>]+)>;%s*rel=\"next\"")
+      if next_page then
+        check_with_bearer(urlparse.absolute(base_url, next_page))
+      end
+    end
+  end
+
+  local function check_manifest_digest(digest)
+    check_with_bearer(urlparse.absolute(url, "../manifests/" .. digest))
+    check_with_bearer(urlparse.absolute(url, "../referrers/" .. digest))
+  end
+
   if status_code == 307
     and string.match(url, "/blobs/") then
+    local newurl = urlparse.absolute(url, http_stat["response_headers"]["headers"]["location"][1])
     new_headers["Accept"] = "*/*"
-    check(urlparse.absolute(url, http_stat["response_headers"]["headers"]["location"][1]))
+    ids[newurl] = true
+    check(newurl)
     new_headers = {}
   end
 
@@ -234,7 +278,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
 
   if string.match(url, "^https?://registry%-1%.docker%.io/") then
     if status_code == 401
-      and item_type == "image" then
+      and context["image"] then
       context["redo"][url] = true
       local newurl = ""
       local header = http_stat["response_headers"]["headers"]["www-authenticate"][1]
@@ -263,42 +307,73 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
           error("Did not recognize key " .. k .. " in header " .. header .. ".")
         end
       end
+      ids[newurl] = true
       check(newurl)
     end
     if status_code < 300 then
       html = read_file(file)
-      if url == context["start_url"] then
-        local digest = http_stat["response_headers"]["headers"]["docker-content-digest"][1]
-        if context["tag"] ~= digest then
-          print_digest("Queuing own digest ", digest)
-          check_with_bearer(urlparse.absolute(url, "./" .. digest))
-        end
-      end
       local content_type = http_stat["response_headers"]["headers"]["content-type"][1]
       if content_type then
         content_type = string.match(content_type, "^(.-)%s*;") or content_type
         content_type = string.lower(content_type)
       end
-      if content_type == "application/vnd.oci.image.index.v1+json"
-        or content_type == "application/vnd.docker.distribution.manifest.list.v2+json" then
-        for _, manifest in pairs(cjson.decode(html)["manifests"]) do
-          print_digest("Queuing new digest ", manifest["digest"])
-          check_with_bearer(urlparse.absolute(url, "./" .. manifest["digest"]))
+      if string.match(url, "/tags/list") then
+        local decoded = cjson.decode(html)
+        for _, tag in pairs(decoded["tags"] or {}) do
+          discover_item(discovered_items, "image:" .. context["image"] .. ":" .. tag)
         end
-      elseif content_type == "application/vnd.oci.image.manifest.v1+json"
-        or content_type == "application/vnd.docker.distribution.manifest.v2+json" then
-        json = cjson.decode(html)
-          print_digest("Queuing config blob ", json["config"]["digest"])
-        check_with_bearer(urlparse.absolute(url, "../blobs/" .. json["config"]["digest"]))
-        for _, layer in pairs(json["layers"]) do
-          print_digest("Queuing binary blob digest ", layer["digest"])
-          check_with_bearer(urlparse.absolute(url, "../blobs/" .. layer["digest"]))
+        check_next_page(url, http_stat["response_headers"]["headers"]["link"])
+      elseif string.match(url, "/referrers/") then
+        if content_type == "application/vnd.oci.image.index.v1+json"
+          or content_type == "application/vnd.docker.distribution.manifest.list.v2+json"
+          or content_type == "application/json" then
+          local decoded = cjson.decode(html)
+          for _, manifest in pairs(decoded["manifests"] or {}) do
+            print_digest("Queuing referrer manifest digest ", manifest["digest"])
+            check_manifest_digest(manifest["digest"])
+          end
+          check_next_page(url, http_stat["response_headers"]["headers"]["link"])
+        else
+          io.stdout:write("Skipping unsupported referrers content-type " .. tostring(content_type) .. ".\n")
+          io.stdout:flush()
         end
       else
-        io.stdout:write("Unrecognized content-type " .. content_type .. ".")
-        io.stdout:flush()
-        abort_item()
-        return {}
+        if url == context["start_url"] then
+          local digest = http_stat["response_headers"]["headers"]["docker-content-digest"][1]
+          if digest and context["tag"] ~= digest then
+            print_digest("Queuing own digest ", digest)
+            check_manifest_digest(digest)
+          end
+        end
+        if content_type == "application/vnd.oci.image.index.v1+json"
+          or content_type == "application/vnd.docker.distribution.manifest.list.v2+json" then
+          for _, manifest in pairs(cjson.decode(html)["manifests"]) do
+            print_digest("Queuing new digest ", manifest["digest"])
+            check_manifest_digest(manifest["digest"])
+          end
+        elseif content_type == "application/vnd.oci.image.manifest.v1+json"
+          or content_type == "application/vnd.docker.distribution.manifest.v2+json" then
+          json = cjson.decode(html)
+          if json["config"] and json["config"]["digest"] then
+            print_digest("Queuing config blob ", json["config"]["digest"])
+            check_with_bearer(urlparse.absolute(url, "../blobs/" .. json["config"]["digest"]))
+          end
+          for _, layer in pairs(json["layers"] or {}) do
+            print_digest("Queuing binary blob digest ", layer["digest"])
+            check_with_bearer(urlparse.absolute(url, "../blobs/" .. layer["digest"]))
+          end
+        elseif content_type == "application/vnd.oci.artifact.manifest.v1+json" then
+          json = cjson.decode(html)
+          for _, blob in pairs(json["blobs"] or {}) do
+            print_digest("Queuing artifact blob digest ", blob["digest"])
+            check_with_bearer(urlparse.absolute(url, "../blobs/" .. blob["digest"]))
+          end
+        else
+          io.stdout:write("Unrecognized content-type " .. content_type .. ".")
+          io.stdout:flush()
+          abort_item()
+          return {}
+        end
       end
     end
   end
@@ -328,6 +403,20 @@ wget.callbacks.write_to_warc = function(url, http_stat)
     -- still mark as correct, handle in get_urls
     io.stdout:write("Not writing this 401 to WARC.\n")
     io.stdout:flush()
+    retry_url = false
+    tries = 0
+    return false
+  end
+  if string.match(url["url"], "/referrers/")
+    and (
+      http_stat["statcode"] == 400
+      or http_stat["statcode"] == 404
+      or http_stat["statcode"] == 405
+    ) then
+    io.stdout:write("Not writing nonexisting /referrers/ to WARC.\n")
+    io.stdout:flush()
+    retry_url = false
+    tries = 0
     return false
   end
   if http_stat["statcode"] ~= 200
@@ -345,26 +434,25 @@ wget.callbacks.write_to_warc = function(url, http_stat)
     return false
   end
   if http_stat["statcode"] == 200 then
-    local etag = http_stat["response_headers"]["headers"]["etag"]
-    if etag then
-      local algorithm, hash = string.match(etag[1], "^\"?([^:]-):(.-)\"?$")
-      if not algorithm or not hash then
-        algorithm = "md5"
-        hash = string.match(etag[1], "^\"?(.-)\"?$")
+    algorithm = nil
+    hash = nil
+    if item_type == "image" or item_type == "blob" then
+      algorithm, hash = string.match(context["tag"], "^(sha256):(.+)$")
+    end
+    if not algorithm then
+      local etag = http_stat["response_headers"]["headers"]["etag"]
+      if etag then
+        local algorithm, hash = string.match(etag[1], "^\"?([^:]-):(.-)\"?$")
+        if not algorithm or not hash then
+          algorithm = "md5"
+          hash = string.match(etag[1], "^\"?(.-)\"?$")
+        end
       end
+    end
+    if algorithm and hash then
       local calculated = calculate_sum(algorithm, http_stat["local_file"])
       if calculated == hash then
-        --print("Sums match with " .. hash .. ".")
-      else
-        io.stdout:write("Sums do not match: expected " .. hash .. ", got " .. calculated .. ".\n")
-        io.stdout:flush()
-        --[[if not string.match(hash, "%-") then
-          retry_url = true
-          return false
-        else]]
-          io.stdout:write("Still accepting...\n")
-          io.stdout:flush()
-        --end
+        print("Sums match.")
       end
     end
   end
@@ -482,7 +570,8 @@ wget.callbacks.finish = function(start_time, end_time, wall_time, numurls, total
   file:close()
   for key, data in pairs({
     --["docker-"] = discovered_items,
-    --["urls-"] = discovered_outlinks
+    --["urls-"] = discovered_outlinks,
+    --["docker-hashes-?skipbloom=1"] = discovered_items_sha256
   }) do
     print("queuing for", string.match(key, "^(.+)%-"))
     local items = nil
@@ -516,5 +605,3 @@ wget.callbacks.before_exit = function(exit_status, exit_status_string)
   end
   return exit_status
 end
-
-

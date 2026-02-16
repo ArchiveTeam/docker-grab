@@ -76,7 +76,7 @@ if not WGET_AT:
 #
 # Update this each time you make a non-cosmetic change.
 # It will be added to the WARC files and reported to the tracker.
-VERSION = '20260216.01'
+VERSION = '20260216.02'
 USER_AGENT = 'docker/29.2.1'
 TRACKER_ID = 'docker'
 TRACKER_HOST = 'legacy-api.arpa.li'
@@ -264,17 +264,31 @@ class WgetArgs(object):
             wget_args.append('item-name://'+item_name)
             item_type, item_value = item_name.split(':', 1)
             if item_type == 'image':
-                if ':' in item_value:
-                    image, tag = item_value.split(':')
-                else:
-                    image = item_value
-                    tag = 'latest'
+                if ':' not in item_value:
+                    raise ValueError('No tag found.')
+                image, tag = item_value.split(':', 1)
+                if '/' not in image:
+                    raise ValueError('No namespace found.')
                 if '.' in image.split('/', 1)[0]:
-                    raise Exception('Custom domain not supported yet.')
+                    raise ValueError('Custom domain not supported yet.')
                 wget_args.extend(['--warc-header', 'docker-image: {}:{}'.format(image, tag)])
-                url = 'https://registry-1.docker.io/v2/{}/manifests/{}'.format(image, tag)
-                wget_args.extend(['--warc-header', 'docker-image-url: '+url])
-                wget_args.append(url)
+                wget_args.append('https://registry-1.docker.io/v2/{}/manifests/{}'.format(image, tag))
+            elif item_type == 'name':
+                image = item_value
+                if '/' not in image:
+                    raise ValueError('No namespace found.')
+                if '.' in image.split('/', 1)[0]:
+                    raise ValueError('Custom domain not supported yet.')
+                wget_args.extend(['--warc-header', 'docker-name: {}'.format(image)])
+                wget_args.append('https://registry-1.docker.io/v2/{}/tags/list'.format(image))
+            elif item_type == 'blob':
+                image, sha256 = item_value.split(':', 1)
+                if '/' not in image:
+                    raise ValueError('No namespace found.')
+                if '.' in image.split('/', 1)[0]:
+                    raise ValueError('Custom domain not supported yet.')
+                wget_args.extend(['--warc-header', 'docker-blob: {}:{}'.format(image, sha256)])
+                wget_args.append('https://registry-1.docker.io/v2/{}/blobs/{}'.format(image, sha256))
             else:
                 raise Exception('Unknown item')
 
@@ -312,7 +326,7 @@ pipeline = Pipeline(
     WgetDownload(
         WgetArgs(),
         max_tries=1,
-        accept_on_exit_code=[0, 4, 8],
+        accept_on_exit_code=[0, 4, 6, 8],
         env={
             'item_dir': ItemValue('item_dir'),
             'item_names': ItemValue('item_name_newline'),
