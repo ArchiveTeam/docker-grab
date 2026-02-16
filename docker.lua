@@ -275,6 +275,10 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         end
       end
       local content_type = http_stat["response_headers"]["headers"]["content-type"][1]
+      if content_type then
+        content_type = string.match(content_type, "^(.-)%s*;") or content_type
+        content_type = string.lower(content_type)
+      end
       if content_type == "application/vnd.oci.image.index.v1+json"
         or content_type == "application/vnd.docker.distribution.manifest.list.v2+json" then
         for _, manifest in pairs(cjson.decode(html)["manifests"]) do
