@@ -74,7 +74,7 @@ end
 
 discover_item = function(target, item)
   if target == discovered_items
-    and string.match(item, "^[a-z]+:[^/]+:sha256:") then
+    and string.match(item, "^[a-z]+:[^:]+:sha256:") then
     target = discovered_items_sha256
   end
   if not target[item] then
@@ -171,7 +171,6 @@ allowed = function(url, parenturl)
         return true
       end]]
       if new_item ~= item_name then
-print('found new item', new_item)
         discover_item(discovered_items, new_item)
         skip = true
       end
@@ -182,8 +181,7 @@ print('found new item', new_item)
   end
 
   for _, pattern in pairs({
-    "/blobs/([^/%?&;]+)$",
-    "/manifests/([^/%?&;]+)$"
+    "([^/%?&;]+)$"
   }) do
     for s in string.gmatch(url, pattern) do
       if ids[string.lower(s)] then
@@ -251,11 +249,6 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
     end
   end
 
-  local function check_manifest_digest(digest)
-    check_with_bearer(urlparse.absolute(url, "../manifests/" .. digest))
-    check_with_bearer(urlparse.absolute(url, "../referrers/" .. digest))
-  end
-
   if status_code == 307
     and string.match(url, "/blobs/") then
     local newurl = urlparse.absolute(url, http_stat["response_headers"]["headers"]["location"][1])
@@ -317,6 +310,9 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
         content_type = string.match(content_type, "^(.-)%s*;") or content_type
         content_type = string.lower(content_type)
       end
+      if item_type == "image" and string.match(url, "/manifests/[^/]+$") then
+        check_with_bearer(urlparse.absolute(url, "../referrers/" .. context["tag"]))
+      end
       if string.match(url, "/tags/list") then
         local decoded = cjson.decode(html)
         for _, tag in pairs(decoded["tags"] or {}) do
@@ -330,7 +326,7 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
           local decoded = cjson.decode(html)
           for _, manifest in pairs(decoded["manifests"] or {}) do
             print_digest("Queuing referrer manifest digest ", manifest["digest"])
-            check_manifest_digest(manifest["digest"])
+            check_with_bearer(urlparse.absolute(url, "../manifests/" .. manifest["digest"]))
           end
           check_next_page(url, http_stat["response_headers"]["headers"]["link"])
         else
@@ -342,14 +338,14 @@ wget.callbacks.get_urls = function(file, url, is_css, iri)
           local digest = http_stat["response_headers"]["headers"]["docker-content-digest"][1]
           if digest and context["tag"] ~= digest then
             print_digest("Queuing own digest ", digest)
-            check_manifest_digest(digest)
+            check_with_bearer(urlparse.absolute(url, "../manifests/" .. digest))
           end
         end
         if content_type == "application/vnd.oci.image.index.v1+json"
           or content_type == "application/vnd.docker.distribution.manifest.list.v2+json" then
           for _, manifest in pairs(cjson.decode(html)["manifests"]) do
             print_digest("Queuing new digest ", manifest["digest"])
-            check_manifest_digest(manifest["digest"])
+            check_with_bearer(urlparse.absolute(url, "../manifests/" .. manifest["digest"]))
           end
         elseif content_type == "application/vnd.oci.image.manifest.v1+json"
           or content_type == "application/vnd.docker.distribution.manifest.v2+json" then
@@ -569,9 +565,8 @@ wget.callbacks.finish = function(start_time, end_time, wall_time, numurls, total
   end
   file:close()
   for key, data in pairs({
-    --["docker-"] = discovered_items,
-    --["urls-"] = discovered_outlinks,
-    --["docker-hashes-?skipbloom=1"] = discovered_items_sha256
+    ["docker-w146w4g1sf856s3t"] = discovered_items,
+    ["docker-hashes-6d6tytww8ozi4qky?skipbloom=1"] = discovered_items_sha256
   }) do
     print("queuing for", string.match(key, "^(.+)%-"))
     local items = nil
